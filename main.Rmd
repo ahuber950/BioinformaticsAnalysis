@@ -1,0 +1,264 @@
+---
+title: "GSE95180 Analysis"
+author: "Alex Huber"
+date: '2024-03-22'
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, cache = TRUE)
+```
+
+```{r load_pkgs, include=FALSE}
+library(pacman)
+
+pacman::p_load(rhdf5, edgeR, tidyverse, stringr, DESeq2, ggpubr, pheatmap, RColorBrewer, biomaRt, ComplexHeatmap, clusterProfiler, ReactomePA, enrichplot, cowplot, gridExtra)
+
+require(scales)
+
+```
+
+
+## Fetching Data & Create Study Design
+```{r query_data_create_study_design}
+
+# Create variable for achs4 hdf5 local file location (downloaded from https://maayanlab.cloud/archs4/)
+archs4.human <- "../human_gene_v2.3.h5"
+
+# h5ls.layout <- h5ls(archs4.human)
+
+# Create reference for every gene
+genes <- h5read(archs4.human, "meta/genes/ensembl_gene")
+
+# Create df for every sample's series ID
+all.series.ids <- h5read(archs4.human, name="meta/samples/series_id")
+
+# IDing my samples by their series IDs
+my.sample.locations <- which(str_detect(all.series.ids, "GSE95180"))
+
+
+# Creating df for my samples' expression
+my.sample.expressions <- t(h5read(archs4.human, "data/expression",
+                     index=list(my.sample.locations, 1:length(genes))))
+
+# Creating vector for my samples' GEO accession IDs
+my.sample.ids <- h5read(archs4.human, name="meta/samples/geo_accession")[my.sample.locations]
+
+# Creating vector for my samples' descriptions
+my.sample.descriptions <- h5read(archs4.human, name="meta/samples/title")[my.sample.locations]
+
+# Creating a study design file from sample descriptions in hdf5 metadata
+my.study.design <- tibble(id = my.sample.ids,
+                          condition = as.factor(str_extract(my.sample.descriptions, ".+(?=_)")),
+                          rep = as.factor(str_extract(my.sample.descriptions, ".$")))
+
+# Renaming rows cols
+rownames(my.sample.expressions) <- genes
+colnames(my.sample.expressions) <- my.sample.ids
+
+
+```
+
+
+## Plotting Total Reads
+```{r plot_reads}
+# Creating a dataframe with the total counts of each sample 
+fullCounts <- as.data.frame(colSums(my.sample.expressions))
+colnames(fullCounts) <- "counts"
+fullCounts$condition <- my.study.design$condition
+
+
+# Plotting total counts for each condition 
+fullCounts %>%
+  ggplot(aes(x = condition, y = counts, size = 6)) +
+  geom_point(position = position_jitterdodge(jitter.width = 0.05)) +
+  guides(size = "none") +
+  labs(title = "Raw Counts in Every Condition") +
+  theme(axis.text.x = element_text(angle = 45, vjust = 0.9, hjust=1))
+
+```
+
+## Creating DESeq Object & Plotting Gene of Interest Reads
+```{r create_DESeq_obj}
+
+# Filter genes out that no reads in 75% of samples
+keep <- rowSums(my.sample.expressions >= 1) >= ncol(my.sample.expressions)*0.75
+my.sample.expressions <- my.sample.expressions[keep,]
+
+# Create a DESeqDataSet from the my.sample.expressions matrix
+# Using my.sytudy.design to inform the analysis of sample information
+# Using design argument to inform of potentially impactful parameters
+dds <- DESeqDataSetFromMatrix(my.sample.expressions, colData = my.study.design, design = ~ rep + condition)
+dds <- DESeq(dds)
+
+# Performing count analysis on ZEB-1 a gene which was found to be upregulated in the source paper
+zeb1.count.data <- plotCounts(dds, gene = "ENSG00000148516", main = "ZEB1", returnData = T)
+
+# Plotting ZEB-1 counts in all samples
+ggplot(zeb1.count.data, aes(x = condition, y = count)) +
+  geom_boxplot() +
+  geom_point() +
+  labs(title = "ZEB1 Counts in All Samples") +
+  stat_compare_means(comparisons = list(c(2,5)), method = "t.test", label.y = 450)
+
+```
+
+
+## Performing PCA on All Samples
+```{r PCA}
+
+# Performing variance stabilizing transformation in order to normalize counts across the experiment
+vsd <- vst(dds)
+
+# Plotting principal component analysis
+plotPCA(vsd, intgroup = c("condition")) +
+  geom_label(aes(label = dds$condition)) +
+  labs(title = "PC1 vs PC2")
+
+# Calculating and plotting sample distances by hierarchical clustering
+sampleDists <- dist(t(assay(vsd)))
+sampleDistMatrix <- as.matrix(sampleDists)
+rownames(sampleDistMatrix) <- vsd$condition
+colnames(sampleDistMatrix) <- NULL
+colors <- colorRampPalette(rev(brewer.pal(9, "Blues")))(255)
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows=sampleDists,
+         clustering_distance_cols=sampleDists,
+         col=colors,
+         main = "Distance Matrix") #plot the PCA
+```
+
+## Performing PCA on Samples of Interest
+```{r PCA_select_samples}
+
+# Creating a subset of samples in order to more clearly define differences between samples of interest
+select.sample.study.design <- filter(my.study.design, condition %in% c("Control_6W", "Ni_6W", "Ni_6W+2W"))
+select.sample.expressions <- my.sample.expressions[,select.sample.study.design$id]
+
+# Creating DDS object for sample subset
+select.dds <- DESeqDataSetFromMatrix(select.sample.expressions, colData = select.sample.study.design, design = ~ rep + condition)
+select.dds <- DESeq(select.dds)
+
+# Performing variance stabilizing transformation in order to normalize counts across the experiment
+select.vsd <- vst(select.dds)
+
+# Plotting principal component analysis
+plotPCA(select.vsd, intgroup = c("condition")) +
+  geom_label(aes(label = select.dds$condition)) +
+  labs(title = "PC1 vs PC2")
+
+# Calculating and plotting sample distances by hierarchical clustering
+select.sampleDists <- dist(t(assay(select.vsd)))
+select.sampleDistMatrix <- as.matrix(select.sampleDists)
+rownames(select.sampleDistMatrix) <- select.vsd$condition
+colnames(select.sampleDistMatrix) <- NULL
+colors <- colorRampPalette(rev(brewer.pal(9, "Blues")))(255)
+pheatmap(select.sampleDistMatrix,
+         clustering_distance_rows=select.sampleDists,
+         clustering_distance_cols=select.sampleDists,
+         col=colors,
+         main = "Distance Matrix")
+```
+
+## Creating Volcano Plots and Heatmap of Genes of Interest
+```{r creating_volcanoplot}
+
+# Creating comparison objects which detail expression differences between chosen conditions
+Ni.6W.vs.Ctrl.6W <- as.data.frame(results(dds, contrast = c("condition", "Control_6W", "Ni_6W")))
+
+# Assigning padj value of 1 to all genes for which no padj value could be calculated
+Ni.6W.vs.Ctrl.6W$padj[is.na(Ni.6W.vs.Ctrl.6W$padj)] <- 1
+
+# Assigning specific values to each gene to signify if it has l2fc >=1, padj <= 0.05, or both
+Ni.6W.vs.Ctrl.6W <- Ni.6W.vs.Ctrl.6W %>%
+  mutate(volcano_color = (abs(log2FoldChange) >= 1) * 2 + (padj <= 0.05))
+
+# Plotting volcanoes
+ggplot(Ni.6W.vs.Ctrl.6W, aes(x = log2FoldChange, y = -log10(padj), color = as.factor(volcano_color))) +
+  geom_point() +
+  labs(title = "Differentially Expressed Genes in Ni-Treated BEAS-2B Cells",
+       subtitle = "6 Weeks Ni Medium Compared to 6 Weeks in Ni-Free Medium") +
+  xlab("log2FoldChange") + ylab("-log10(padj)") +
+  scale_color_manual(labels = (c("abs(l2FC) < 1 & padj > 0.05",
+                                 "abs(l2FC) < 1 & padj < 0.05",
+                                 "abs(l2FC) > 1 & padj > 0.05",
+                                 "abs(l2FC) > 1 & padj < 0.05")),
+                     values = c("black", "darkgreen", "blue", "red"))
+```
+
+
+```{r creating_heatmap}
+
+# Creating comparison objects which detail expression differences between chosen conditions
+Ni.6W2W.vs.Ctrl.6W <- as.data.frame(results(dds, contrast = c("condition", "Control_6W", "Ni_6W+2W")))
+
+# Creating a vector that contains all significantly up or down-regulated genes
+Ni.6W.vs.Ctrl.6W.sig.genes <- rownames(filter(Ni.6W.vs.Ctrl.6W, abs(log2FoldChange) >= 1, padj <= 0.05))
+Ni.6W2W.vs.Ctrl.6W.sig.genes <- rownames(filter(Ni.6W2W.vs.Ctrl.6W, abs(log2FoldChange) >= 1, padj <= 0.05))
+all.sig.genes <- unique(Ni.6W.vs.Ctrl.6W.sig.genes, Ni.6W2W.vs.Ctrl.6W.sig.genes)
+
+# Filtering DESeq results object to only include genes of interest and samples of interest and performing variance stabilizing transformation
+trim_vsd <- as.data.frame(assay(vsd))[all.sig.genes, filter(my.study.design, condition %in% c("Control_6W", "Ni_6W", "Ni_6W+2W"))$id]
+
+# Scaling the results object so that gene expression means are centered at zero
+scale_vsd <- as.data.frame(t(scale(t(trim_vsd))))
+
+# Creating a heatmap with 2 row splits
+Heatmap.2splits <- Heatmap(scale_vsd,
+        name = "Expression",
+        column_title = "Differentially Expressed Genes in Ni-Treated BEAS-2B Cells",
+        show_row_names = F,
+        show_column_names = F,
+        cluster_columns = F,
+        column_split = filter(my.study.design, condition %in% c("Control_6W", "Ni_6W", "Ni_6W+2W"))$condition,
+        row_split = 2,
+        clustering_method_rows = "ward.D2",
+        top_annotation = HeatmapAnnotation(foo = anno_block(labels = c("Control_6W", "Ni_6W", "Ni_6W+2W")))
+        )
+
+# Plotting heatmap
+Heatmap.2splits
+
+```
+
+## Performing Gene Set Enrichment Analysis
+```{r enrichment_analysis}
+# A for loop that creates a list of enrichment pathways for each group in an input heatmap
+enriched <- list()
+dots <- list()
+cnets <- list()
+
+for (i in 1:length(row_order(Heatmap.2splits))) {
+  enriched[[i]] <-
+    enrichGO(
+      Heatmap.2splits@row_names_param$labels[row_order(Heatmap.2splits)[[i]]],
+      OrgDb = "org.Hs.eg.db",
+      keyType = "ENSEMBL",
+      ont = "BP",
+      pvalueCutoff = 1,
+      qvalueCutoff = 1
+    )
+  dots[[i]] <- enrichplot::dotplot(enriched[[i]], x = "Count", showCategory = 8, font.size = 10)
+  cnets[[i]] <- enrichplot::cnetplot(enriched[[i]], node_label = "category", font.size = 10)
+
+}
+```
+
+
+```{r enrichment_analysis_plots, fig.width=20,fig.height=12}
+
+plot_grid(dots[[1]], dots[[2]], cnets[[1]], cnets[[2]],
+          nrow = 2, ncol = 2, align = "hv",
+          labels = c("Dotplot Figure of Enriched Gene Sets in Cluster 1",
+                     "Dotplot Figure of Enriched Gene Sets in Cluster 2",
+                     "Netplot Figure of Enriched Gene Sets in Cluster 1",
+                     "Netplot Figure of Enriched Gene Sets in Cluster 2"))
+
+```
+
+
+
+
