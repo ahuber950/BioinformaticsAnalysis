@@ -6,6 +6,14 @@ output:
   html_document:
     toc: true
     toc_float: true
+knit:
+  (function(input, ...) {
+    rmarkdown::render(
+      input,
+      output_file = 'index.html'
+    )
+  })
+
 ---
 
 ```{r setup, include=FALSE}
