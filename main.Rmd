@@ -1,7 +1,6 @@
 ---
-title: "GSE95180 Analysis"
+title: "RNA Sequencing Analysis"
 author: "Alex Huber"
-date: '2024-03-22'
 output:
   html_document:
     toc: true
@@ -20,6 +19,12 @@ knit:
 knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, cache = TRUE)
 ```
 
+<br><br>
+
+## Background  
+
+#### This is an analysis of the RNA Sequencing data first published in the paper [Nickel exposure induces persistent mesenchymal phenotype in human lung epithelial cells through epigenetic activation of ZEB1](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC5930076/). Here I perform Differential Expression Sequencing Analysis, looking at patterns of up- and down-regulated genes and biological pathways in each experimental condition.
+
 ```{r load_pkgs, include=FALSE}
 library(pacman)
 
@@ -29,11 +34,24 @@ require(scales)
 
 ```
 
+<br><br>
 
-## Fetching Data & Create Study Design
+## Fetching Data & Creating Study Design  
+
+#### The first step is collecting the public data through the [ARCHS4 online database](https://maayanlab.cloud/archs4/). I then identify the experimental conditions for each sample and put them into a variable my.study.design.
+
+#### The different conditions tested here are
+* Control_3D: cells untreated with Nickel after 3 days
+* Control_6W: cells untreated with Nickel after 6 weeks
+* Ni_3D: cells treated with Nickel after 3 days
+* Ni_3D+14D: cells treated with Nickel after 17 days
+* Ni_6W: cells treated with Nickel after 6 weeks
+Ni_6W+2W: cells treated with Nickel for 6 weeks then without Nickel for 2 weeks
+* Ni_clone: cells cloned from a single cell in the Ni_6W condition
+
 ```{r query_data_create_study_design}
 
-# Create variable for achs4 hdf5 local file location (downloaded from https://maayanlab.cloud/archs4/)
+# Create variable for archs4 hdf5 local file location (downloaded from https://maayanlab.cloud/archs4/)
 archs4.human <- "../human_gene_v2.3.h5"
 
 # h5ls.layout <- h5ls(archs4.human)
@@ -55,6 +73,10 @@ my.sample.expressions <- t(h5read(archs4.human, "data/expression",
 # Creating vector for my samples' GEO accession IDs
 my.sample.ids <- h5read(archs4.human, name="meta/samples/geo_accession")[my.sample.locations]
 
+# Renaming rows cols
+rownames(my.sample.expressions) <- genes
+colnames(my.sample.expressions) <- my.sample.ids
+
 # Creating vector for my samples' descriptions
 my.sample.descriptions <- h5read(archs4.human, name="meta/samples/title")[my.sample.locations]
 
@@ -63,15 +85,15 @@ my.study.design <- tibble(id = my.sample.ids,
                           condition = as.factor(str_extract(my.sample.descriptions, ".+(?=_)")),
                           rep = as.factor(str_extract(my.sample.descriptions, ".$")))
 
-# Renaming rows cols
-rownames(my.sample.expressions) <- genes
-colnames(my.sample.expressions) <- my.sample.ids
-
-
+my.study.design
 ```
 
 
+<br><br>
+
 ## Plotting Total Reads
+
+#### I first look at the total number of sequences that came in from each sample in order look for any obvious outliers. These samples all appear to be within a similar range.
 ```{r plot_reads}
 # Creating a dataframe with the total counts of each sample 
 fullCounts <- as.data.frame(colSums(my.sample.expressions))
@@ -89,7 +111,11 @@ fullCounts %>%
 
 ```
 
+<br><br>
+
 ## Creating DESeq Object & Plotting Gene of Interest Reads
+
+#### This paper's authors found an increase in expression of the gene ZEB1 after 6 weeks of Nickel exposure. I found that there is an increase of ZEB1 RNA transcripts after Nickel exposure, but the statistical significance is only p < 0.05 when comparing the the Ni_6W samples to the Control_3D samples rather than the Control_6W samples (p=0.1) using a t-test.
 ```{r create_DESeq_obj}
 
 # Filter genes out that no reads in 75% of samples
@@ -110,12 +136,17 @@ ggplot(zeb1.count.data, aes(x = condition, y = count)) +
   geom_boxplot() +
   geom_point() +
   labs(title = "ZEB1 Counts in All Samples") +
-  stat_compare_means(comparisons = list(c(2,5)), method = "t.test", label.y = 450)
+  stat_compare_means(comparisons = list(c(2,5)), method = "t.test", label.y = 450) +
+    stat_compare_means(comparisons = list(c(1,5)), method = "t.test", label.y = 500)
+
 
 ```
 
+<br><br>
 
 ## Performing PCA on All Samples
+
+#### My next step was to perform pricipal component analysis (PCA) in order to determine which sample groups were most distinct from the others. I found that the greatest variance between all samples (PC1) separated the Control_3D samples from the remaining samples. Interestingly, these Control_3D samples also separated to form two distinct clusters along the second largest principal component axis (PC2). I then plotted a distance matrix which clustered the samples by which other samples they are most similar to. The darker a cell is colored represents a greater similarity to the corresponding sample. This shows that the Control_3D samples are very dissimilar to the other samples. Along with, interestingly, one Ni_6W sample.
 ```{r PCA}
 
 # Performing variance stabilizing transformation in order to normalize counts across the experiment
@@ -138,8 +169,11 @@ pheatmap(sampleDistMatrix,
          col=colors,
          main = "Distance Matrix") #plot the PCA
 ```
+<br><br>
 
 ## Performing PCA on Samples of Interest
+
+#### My next step was to narrow down the samples that I was investigating. The comparisons I was most interested in making were between the Control_6W, Ni_6W, and Ni_6W+2W groups. The largest PC showed a stark difference between one Ni_6W outlier and the remaining samples (which was also revealed in the previous distance matrix). PC2, however, showed a clear difference between the Control_6W samples and the Ni-treated samples. The distance matrix confirmed these findings.
 ```{r PCA_select_samples}
 
 # Creating a subset of samples in order to more clearly define differences between samples of interest
@@ -171,7 +205,11 @@ pheatmap(select.sampleDistMatrix,
          main = "Distance Matrix")
 ```
 
-## Creating Volcano Plots and Heatmap of Genes of Interest
+<br><br>
+
+## Creating Volcano Plot
+
+#### The next step was to identify the genes that were significantly differrentially expressed between the Control_6W samples and the Ni_6W samples. I visualized these genes using a volcano plot with the log of each gene's fold change on the x-axis and the log of each gene's p-value on the y-axis. My genes of interest are labeled here in red with abs(log2FC) > 1 and p.adj value < 0.05.
 ```{r creating_volcanoplot}
 
 # Creating comparison objects which detail expression differences between chosen conditions
@@ -196,7 +234,11 @@ ggplot(Ni.6W.vs.Ctrl.6W, aes(x = log2FoldChange, y = -log10(padj), color = as.fa
                                  "abs(l2FC) > 1 & padj < 0.05")),
                      values = c("black", "darkgreen", "blue", "red"))
 ```
+<br><br>
 
+## Creating Heatmap of Genes of Interest
+
+#### I then visualized my genes of interest using a heatmap, showing the relative expression of each gene within each sample group. Each row represents a gene of interest and each column represents one sample. I chose to subset this heatmap into two groups in order to perform gene set enrichment analysis on each group, which will allow me to determine if the genes that were largely up- or down-regulated are involved in any of the same biological pathways or processes.
 
 ```{r creating_heatmap}
 
@@ -232,8 +274,12 @@ Heatmap.2splits
 
 ```
 
+<br><br>
+
 ## Performing Gene Set Enrichment Analysis
-```{r enrichment_analysis}
+
+#### The final step involves analyzing the subsets of genes that were differentially expressed in order to discover any biological pathways or processes that are overrepresented. This offers insight into the specific mechanisms that the experimental conditions affect most broadly. 
+```{r enrichment_analysis, fig.width=20,fig.height=12}
 # A for loop that creates a list of enrichment pathways for each group in an input heatmap
 enriched <- list()
 dots <- list()
@@ -253,10 +299,6 @@ for (i in 1:length(row_order(Heatmap.2splits))) {
   cnets[[i]] <- enrichplot::cnetplot(enriched[[i]], node_label = "category", font.size = 10)
 
 }
-```
-
-
-```{r enrichment_analysis_plots, fig.width=20,fig.height=12}
 
 plot_grid(dots[[1]], dots[[2]], cnets[[1]], cnets[[2]],
           nrow = 2, ncol = 2, align = "hv",
@@ -266,7 +308,5 @@ plot_grid(dots[[1]], dots[[2]], cnets[[1]], cnets[[2]],
                      "Netplot Figure of Enriched Gene Sets in Cluster 2"))
 
 ```
-
-
 
 
